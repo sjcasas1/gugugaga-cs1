@@ -59,14 +59,20 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: Add swap (LTO headroom)
+      - name: Ensure swap (best effort)
+        continue-on-error: true
         run: |
-          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h; df -h /
-
+          SWAP_MB=$(free -m | awk '/^Swap:/{print $2+0}')
+          echo "current swap: ${SWAP_MB}MB"
+          if [ "$SWAP_MB" -lt 4096 ]; then
+            sudo swapoff -a || true
+            sudo rm -f /swapfile || true
+            sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 || true
+            sudo chmod 600 /swapfile || true
+            sudo mkswap /swapfile || true
+            sudo swapon /swapfile || true
+          fi
+          free -h
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
@@ -144,27 +150,14 @@ jobs:
         run: |
           cd src
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" dtbs 2>&1 | tail -n 5
-
-      - name: Build modules
-        run: |
-          cd src
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules
-          cat out/include/config/kernel.release
-
-      - name: Diagnostics on failure
-        if: failure()
-        run: |
-          echo "--- free ---"; free -h || true
-          echo "--- disk ---"; df -h / || true
-          echo "--- kernel log tail ---"; sudo dmesg | tail -n 25 || true
+          ls src/out/arch/arm64/boot/dts/vendor/qcom/*.dtb 2>/dev/null | head -n 5 || true
 
       - name: Collect artifacts
         run: |
-          mkdir -p dist/modules
+          mkdir -p dist
           cp src/out/arch/arm64/boot/Image dist/Image
           gzip -c dist/Image > dist/Image.gz
           find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp --parents {} dist/ \; 2>/dev/null || true
-          find src/out -name "*.ko" -exec cp --parents {} dist/modules/ \; || true
           cp src/out/.config dist/kernel.config
           cat src/out/include/config/kernel.release > dist/KERNEL_VERSION.txt
           ls -l dist
