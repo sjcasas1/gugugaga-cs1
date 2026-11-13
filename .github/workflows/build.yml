@@ -59,6 +59,14 @@ jobs:
           sudo apt-get clean
           df -h /
 
+      - name: Add swap (LTO headroom)
+        run: |
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h; df -h /
+
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
@@ -126,11 +134,29 @@ jobs:
           echo '---- Droidspaces options ----'
           grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|ANDROID_KABI_RESERVE)=' out/.config || true
 
-      - name: Build
+      - name: Build Image (ThinLTO)
         run: |
           cd src
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image dtbs modules
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
+          free -h; df -h /
+
+      - name: Build dtbs
+        run: |
+          cd src
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" dtbs 2>&1 | tail -n 5
+
+      - name: Build modules
+        run: |
+          cd src
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules
           cat out/include/config/kernel.release
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- free ---"; free -h || true
+          echo "--- disk ---"; df -h / || true
+          echo "--- kernel log tail ---"; sudo dmesg | tail -n 25 || true
 
       - name: Collect artifacts
         run: |
