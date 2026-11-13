@@ -1,0 +1,183 @@
+name: m2391-sync-and-build
+
+# 你自己的仓库：每次运行先拉上游最新（或钉住的 commit），开启 Droidspaces 后编译，
+# 产物挂 Release/Artifact，并把本次编译对应的上游 commit 记进 last-build.json。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'upstream repo (owner/name)'
+        default: 'baizhi958216/android_kernel_meizu_m2391'
+        required: true
+      kernel_branch:
+        description: 'branch'
+        default: 'oss/lineage-24.0'
+        required: true
+      kernel_commit:
+        description: 'commit SHA to pin (empty = branch head)'
+        default: ''
+        required: false
+      make_release:
+        description: 'create a GitHub Release with the artifacts'
+        default: 'true'
+        required: false
+  schedule:
+    - cron: '0 18 * * *'   # 每天 UTC 18:00 = 北京时间 02:00
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'm2391-droidspaces/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m2391-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      ARCH: arm64
+      DEFCONFIG: m2391_defconfig
+      CLANG_VER: clang-r450784e
+      KBUILD_BUILD_USER: gh-actions
+      KBUILD_BUILD_HOST: github
+      KBUILD_BUILD_TIMESTAMP: '2026-01-01 00:00:00 UTC'
+      KR_REPO: ${{ inputs.kernel_repo || 'baizhi958216/android_kernel_meizu_m2391' }}
+      KR_BRANCH: ${{ inputs.kernel_branch || 'oss/lineage-24.0' }}
+      KR_COMMIT: ${{ inputs.kernel_commit || '' }}
+      MAKE_RELEASE: ${{ inputs.make_release || 'true' }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo apt-get clean
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
+            dwarves cpio kmod rsync zip unzip python3 xz-utils patch git
+
+      - name: Cache AOSP clang
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: clang-${{ env.CLANG_VER }}-v1
+
+      - name: Install AOSP clang
+        run: |
+          if [ ! -x "$HOME/clang/bin/clang" ]; then
+            mkdir -p "$HOME/clang"
+            curl -fL -o /tmp/clang.tar.gz \
+              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VER}.tar.gz"
+            tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
+          fi
+          "$HOME/clang/bin/clang" --version
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+
+      - name: Sync upstream (clone)
+        id: sync
+        run: |
+          git clone --depth 1 --single-branch --branch "$KR_BRANCH" \
+            "https://github.com/$KR_REPO.git" src
+          if [ -n "$KR_COMMIT" ]; then
+            cd src
+            git fetch --depth 1 origin "$KR_COMMIT"
+            git checkout --detach FETCH_HEAD
+            cd ..
+          fi
+          SHA=$(git -C src rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=$(echo $SHA | cut -c1-10)" >> "$GITHUB_OUTPUT"
+          git -C src log -1 --oneline
+
+      - name: Apply Droidspaces kABI patch
+        run: |
+          cd src
+          patch -p1 --dry-run < "$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
+          patch -p1 < "$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
+
+      - name: Configure kernel
+        run: |
+          cd src
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 $DEFCONFIG
+          scripts/kconfig/merge_config.sh -m -O out out/.config "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config"
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig
+          echo '---- Droidspaces options ----'
+          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|ANDROID_KABI_RESERVE)=' out/.config || true
+
+      - name: Build
+        run: |
+          cd src
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image dtbs modules
+          cat out/include/config/kernel.release
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/modules
+          cp src/out/arch/arm64/boot/Image dist/Image
+          gzip -c dist/Image > dist/Image.gz
+          find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp --parents {} dist/ \; 2>/dev/null || true
+          find src/out -name "*.ko" -exec cp --parents {} dist/modules/ \; || true
+          cp src/out/.config dist/kernel.config
+          echo "$(cat src/out/include/config/kernel.release)" > dist/KERNEL_VERSION.txt
+          ls -l dist
+
+      - name: Build AnyKernel3 zip
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
+          rm -rf /tmp/ak3/.git
+          cp dist/Image /tmp/ak3/Image
+          cp m2391-droidspaces/anykernel.sh /tmp/ak3/anykernel.sh
+          DTB=$(find src/out/arch/arm64/boot/dts -name "*m2391*.dtb" | head -n1)
+          if [ -n "$DTB" ]; then cp "$DTB" /tmp/ak3/dtb; fi
+          ( cd /tmp/ak3 && zip -r9 ../kernel-m2391-droidspaces.zip . -x "*.git*" > /dev/null )
+          cp /tmp/kernel-m2391-droidspaces.zip dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-m2391-${{ steps.sync.outputs.short }}
+          path: dist/
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: env.MAKE_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          KV=$(cat dist/KERNEL_VERSION.txt)
+          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}"
+          gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
+            --title "$KV  (${{ steps.sync.outputs.short }})" \
+            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }}\ncommit: ${{ steps.sync.outputs.sha }}\nDroidspaces: kABI padding patch + droidspaces.config"
+
+      - name: Record last build
+        run: |
+          KV=$(cat dist/KERNEL_VERSION.txt)
+          cat > last-build.json <<EOF
+          {
+            "kernel_repo": "$KR_REPO",
+            "kernel_branch": "$KR_BRANCH",
+            "commit": "${{ steps.sync.outputs.sha }}",
+            "kernel_version": "$KV",
+            "kabi_padding": "$(grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' src/out/.config && echo yes || echo no)",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last-build.json
+          git diff --cached --quiet || git commit -m "build: $(cat dist/KERNEL_VERSION.txt) / ${{ steps.sync.outputs.short }}"
+          git push
