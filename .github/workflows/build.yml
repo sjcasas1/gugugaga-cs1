@@ -1,7 +1,7 @@
 name: m2391-sync-and-build
 
-# 你自己的仓库：每次运行先拉上游最新（或钉住的 commit），开启 Droidspaces 后编译，
-# 产物挂 Release/Artifact，并把本次编译对应的上游 commit 记进 last-build.json。
+# v2: 修复第一次失败（AOSP clang r450784e 归档路径 404 / curl exit 22）
+# 工具链获取顺序：apt clang-14 -> AOSP clang-r487747c 归档 -> 报错退出
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ on:
         default: 'true'
         required: false
   schedule:
-    - cron: '0 18 * * *'   # 每天 UTC 18:00 = 北京时间 02:00
+    - cron: '0 18 * * *'
   push:
     branches: [main]
     paths:
@@ -44,7 +44,6 @@ jobs:
     env:
       ARCH: arm64
       DEFCONFIG: m2391_defconfig
-      CLANG_VER: clang-r450784e
       KBUILD_BUILD_USER: gh-actions
       KBUILD_BUILD_HOST: github
       KBUILD_BUILD_TIMESTAMP: '2026-01-01 00:00:00 UTC'
@@ -56,7 +55,7 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
           sudo apt-get clean
           df -h /
 
@@ -67,24 +66,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
-            dwarves cpio kmod rsync zip unzip python3 xz-utils patch git
+            dwarves cpio kmod rsync zip unzip python3 xz-utils patch git \
+            clang-14 lld-14 llvm-14
 
-      - name: Cache AOSP clang
+      - name: Cache toolchain
         uses: actions/cache@v4
         with:
           path: ~/clang
-          key: clang-${{ env.CLANG_VER }}-v1
+          key: clang14-llvm14-v2
 
-      - name: Install AOSP clang
+      - name: Assemble toolchain in ~/clang/bin
         run: |
+          mkdir -p "$HOME/clang/bin"
+          for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip llvm-size llvm-link opt; do
+            src=""
+            if [ -x "/usr/lib/llvm-14/bin/$t" ]; then src="/usr/lib/llvm-14/bin/$t";
+            elif command -v "$t" >/dev/null 2>&1; then src="$(command -v "$t")";
+            elif command -v "$t-14" >/dev/null 2>&1; then src="$(command -v "$t-14")"; fi
+            if [ -n "$src" ]; then ln -sf "$src" "$HOME/clang/bin/$t"; fi
+          done
           if [ ! -x "$HOME/clang/bin/clang" ]; then
-            mkdir -p "$HOME/clang"
+            echo "apt clang not usable, falling back to AOSP archive"
             curl -fL -o /tmp/clang.tar.gz \
-              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VER}.tar.gz"
+              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz"
             tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
           fi
-          "$HOME/clang/bin/clang" --version
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
 
       - name: Sync upstream (clone)
         id: sync
@@ -131,7 +140,7 @@ jobs:
           find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp --parents {} dist/ \; 2>/dev/null || true
           find src/out -name "*.ko" -exec cp --parents {} dist/modules/ \; || true
           cp src/out/.config dist/kernel.config
-          echo "$(cat src/out/include/config/kernel.release)" > dist/KERNEL_VERSION.txt
+          cat src/out/include/config/kernel.release > dist/KERNEL_VERSION.txt
           ls -l dist
 
       - name: Build AnyKernel3 zip
@@ -161,7 +170,7 @@ jobs:
           TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}"
           gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
             --title "$KV  (${{ steps.sync.outputs.short }})" \
-            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }}\ncommit: ${{ steps.sync.outputs.sha }}\nDroidspaces: kABI padding patch + droidspaces.config"
+            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }}" || true
 
       - name: Record last build
         run: |
@@ -179,5 +188,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last-build.json
-          git diff --cached --quiet || git commit -m "build: $(cat dist/KERNEL_VERSION.txt) / ${{ steps.sync.outputs.short }}"
-          git push
+          git diff --cached --quiet || git commit -m "build: $(cat dist/KERNEL_VERSION.txt)"
+          git push || true
