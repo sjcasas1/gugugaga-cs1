@@ -1,9 +1,8 @@
 {
-  "note": "由 workflow 自动更新：记录最近一次成功编译对应的上游 commit 与内核版本",
-  "kernel_repo": null,
-  "kernel_branch": null,
-  "commit": null,
-  "kernel_version": null,
-  "kabi_padding": null,
-  "built_at": null
+  "kernel_repo": "baizhi958216/android_kernel_meizu_m2391",
+  "kernel_branch": "oss/lineage-24.0",
+  "commit": "d7402701fe4589317a181db95adfd3c32e2ff2be",
+  "kernel_version": "5.15.223-gd7402701fe45-dirty",
+  "kabi_padding": "yes",
+  "built_at": "2026-11-13T21:10:00Z"
 }
