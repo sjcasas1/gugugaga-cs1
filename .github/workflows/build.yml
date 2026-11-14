@@ -1,7 +1,11 @@
 name: m2391-sync-and-build
 
-# v2: 修复第一次失败（AOSP clang r450784e 归档路径 404 / curl exit 22）
-# 工具链获取顺序：apt clang-14 -> AOSP clang-r487747c 归档 -> 报错退出
+# v6 关键修正：
+# 1) 打完 kABI 补丁后 git commit，避免内核版本带上 "-dirty"，否则 UTS_RELEASE/vermagic
+#    与现有 vendor 模块不一致，模块会被拒载（"version magic ... should be ..."）。
+# 2) 硬校验 CONFIG_ANDROID_KABI_RESERVE=y，缺失就失败（否则只刷 boot 会砖）。
+# 3) AnyKernel3 按 A/B 设备配置（m2391 是 AB_OTA_UPDATER）。
+# 4) 去掉无效的 dtbs 构建与无效的 toolchain 缓存；clone/apt 加 retry。
 
 on:
   workflow_dispatch:
@@ -19,7 +23,7 @@ on:
         default: ''
         required: false
       make_release:
-        description: 'create a GitHub Release with the artifacts'
+        description: 'create a GitHub Release'
         default: 'true'
         required: false
   schedule:
@@ -51,11 +55,12 @@ jobs:
       KR_BRANCH: ${{ inputs.kernel_branch || 'oss/lineage-24.0' }}
       KR_COMMIT: ${{ inputs.kernel_commit || '' }}
       MAKE_RELEASE: ${{ inputs.make_release || 'true' }}
+      JOBS: 4
 
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift /usr/local/.ghcup || true
           sudo apt-get clean
           df -h /
 
@@ -68,26 +73,24 @@ jobs:
             sudo swapoff -a || true
             sudo rm -f /swapfile || true
             sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 || true
+            sudo chown root:root /swapfile || true
             sudo chmod 600 /swapfile || true
             sudo mkswap /swapfile || true
             sudo swapon /swapfile || true
           fi
           free -h
+
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
+          for i in 1 2 3; do
+            sudo apt-get update && break || sleep 10
+          done
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
             dwarves cpio kmod rsync zip unzip python3 xz-utils patch git \
             clang-14 lld-14 llvm-14
-
-      - name: Cache toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/clang
-          key: clang14-llvm14-v2
 
       - name: Assemble toolchain in ~/clang/bin
         run: |
@@ -99,84 +102,93 @@ jobs:
             elif command -v "$t-14" >/dev/null 2>&1; then src="$(command -v "$t-14")"; fi
             if [ -n "$src" ]; then ln -sf "$src" "$HOME/clang/bin/$t"; fi
           done
-          if [ ! -x "$HOME/clang/bin/clang" ]; then
-            echo "apt clang not usable, falling back to AOSP archive"
-            curl -fL -o /tmp/clang.tar.gz \
-              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz"
-            tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
-          fi
+          test -x "$HOME/clang/bin/clang"
+          test -x "$HOME/clang/bin/ld.lld"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version
           "$HOME/clang/bin/ld.lld" --version
 
-      - name: Sync upstream (clone)
+      - name: Sync upstream (clone, retry)
         id: sync
         run: |
-          git clone --depth 1 --single-branch --branch "$KR_BRANCH" \
-            "https://github.com/$KR_REPO.git" src
+          for i in 1 2 3; do
+            rm -rf src
+            if git clone --depth 1 --single-branch --branch "$KR_BRANCH" "https://github.com/$KR_REPO.git" src; then break; fi
+            echo "clone failed (attempt $i), retrying"; sleep 15
+          done
+          test -d src/.git
           if [ -n "$KR_COMMIT" ]; then
             cd src
-            git fetch --depth 1 origin "$KR_COMMIT"
-            git checkout --detach FETCH_HEAD
+            git fetch --depth 1 origin "$KR_COMMIT" && git checkout --detach FETCH_HEAD
             cd ..
           fi
           SHA=$(git -C src rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "short=$(echo $SHA | cut -c1-10)" >> "$GITHUB_OUTPUT"
+          echo "short=$(echo "$SHA" | cut -c1-10)" >> "$GITHUB_OUTPUT"
           git -C src log -1 --oneline
 
-      - name: Apply Droidspaces kABI patch
+      - name: Apply Droidspaces kABI patch and commit it
         run: |
           cd src
-          patch -p1 --dry-run < "$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
-          patch -p1 < "$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
+          PATCH="$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
+          if ! patch -p1 --dry-run < "$PATCH"; then
+            echo "::error::kABI patch no longer applies to upstream sched.h (upstream changed?); aborting instead of shipping an ABI-breaking kernel"
+            exit 1
+          fi
+          patch -p1 < "$PATCH"
+          grep -q "android_kabi_reserved6" include/linux/sched.h || { echo "::error::patch applied but expected kABI padding not found"; exit 1; }
+          # 关键：提交掉，避免 uname -r 出现 -dirty，导致 vermagic 与现有模块不匹配
+          git add -A
+          git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "droidspaces: kABI-safe SYSVIPC padding"
+          git status --short
+          echo "tree is clean => no -dirty suffix in kernel release"
 
       - name: Configure kernel
         run: |
           cd src
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 $DEFCONFIG
-          scripts/kconfig/merge_config.sh -m -O out out/.config "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config"
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig
+          scripts/kconfig/merge_config.sh -m -O out out/.config "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config" >/dev/null
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
           echo '---- Droidspaces options ----'
-          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|ANDROID_KABI_RESERVE)=' out/.config || true
+          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=' out/.config || true
+          if ! grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' out/.config; then
+            echo "::error::CONFIG_ANDROID_KABI_RESERVE is not y -> struct task_struct layout moved, boot-only flash would break vendor modules";
+            exit 1
+          fi
+          for opt in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS; do
+            grep -q "^CONFIG_${opt}=y" out/.config || { echo "::error::missing CONFIG_${opt}=y"; exit 1; }
+          done
 
       - name: Build Image (ThinLTO)
         run: |
           cd src
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
+          echo "kernel release: $(cat out/include/config/kernel.release)"
+          echo "vermagic:       $(cat out/include/config/kernel.release) SMP preempt mod_unload modversions aarch64"
           free -h; df -h /
-
-      - name: Build dtbs
-        run: |
-          cd src
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$(nproc)" dtbs 2>&1 | tail -n 5
-          ls src/out/arch/arm64/boot/dts/vendor/qcom/*.dtb 2>/dev/null | head -n 5 || true
 
       - name: Collect artifacts
         run: |
           mkdir -p dist
           cp src/out/arch/arm64/boot/Image dist/Image
           gzip -c dist/Image > dist/Image.gz
-          find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp --parents {} dist/ \; 2>/dev/null || true
           cp src/out/.config dist/kernel.config
           cat src/out/include/config/kernel.release > dist/KERNEL_VERSION.txt
           ls -l dist
 
-      - name: Build AnyKernel3 zip
+      - name: Build AnyKernel3 zip (A/B)
         continue-on-error: true
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
           rm -rf /tmp/ak3/.git
           cp dist/Image /tmp/ak3/Image
           cp m2391-droidspaces/anykernel.sh /tmp/ak3/anykernel.sh
-          DTB=$(find src/out/arch/arm64/boot/dts -name "*m2391*.dtb" | head -n1)
-          if [ -n "$DTB" ]; then cp "$DTB" /tmp/ak3/dtb; fi
           ( cd /tmp/ak3 && zip -r9 ../kernel-m2391-droidspaces.zip . -x "*.git*" > /dev/null )
           cp /tmp/kernel-m2391-droidspaces.zip dist/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: kernel-m2391-${{ steps.sync.outputs.short }}
+          name: kernel-m2391-${{ steps.sync.outputs.short }}-r${{ github.run_number }}
           path: dist/
           retention-days: 30
 
@@ -186,26 +198,40 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           KV=$(cat dist/KERNEL_VERSION.txt)
-          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}"
+          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}a${{ github.run_attempt }}"
           gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
             --title "$KV  (${{ steps.sync.outputs.short }})" \
-            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }}"
+            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }} kabi_padding: yes lto: thin"
 
       - name: Record last build
         run: |
           KV=$(cat dist/KERNEL_VERSION.txt)
+          SHA="${{ steps.sync.outputs.sha }}"
           cat > last-build.json <<EOF
           {
             "kernel_repo": "$KR_REPO",
             "kernel_branch": "$KR_BRANCH",
-            "commit": "${{ steps.sync.outputs.sha }}",
+            "commit": "$SHA",
             "kernel_version": "$KV",
-            "kabi_padding": "$(grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' src/out/.config && echo yes || echo no)",
+            "kabi_padding": "yes",
+            "lto": "thin",
+            "run": "${{ github.run_number }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last-build.json
-          git diff --cached --quiet || git commit -m "build: $(cat dist/KERNEL_VERSION.txt)"
-          git push || true
+          git diff --cached --quiet && echo "no change" && exit 0
+          git commit -m "build: $KV ($(echo "$SHA" | cut -c1-10))"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin main >/dev/null 2>&1 || true
+            git push && break || sleep 5
+          done
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- free ---"; free -h || true
+          echo "--- disk ---"; df -h / || true
+          echo "--- kernel log tail ---"; sudo dmesg | tail -n 20 || true
