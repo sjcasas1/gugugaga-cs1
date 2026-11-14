@@ -2,7 +2,9 @@
   "kernel_repo": "baizhi958216/android_kernel_meizu_m2391",
   "kernel_branch": "oss/lineage-24.0",
   "commit": "d7402701fe4589317a181db95adfd3c32e2ff2be",
-  "kernel_version": "5.15.223-gd7402701fe45-dirty",
+  "kernel_version": "5.15.223-gce44b716601b",
   "kabi_padding": "yes",
-  "built_at": "2026-11-14T06:22:38Z"
+  "lto": "thin",
+  "run": "8",
+  "built_at": "2026-11-14T07:00:05Z"
 }
