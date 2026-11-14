@@ -104,14 +104,12 @@ jobs:
           test -d src/.git
           cd src
           EXP="$EXPECTED_VERSION"
-          PARsed=""
           if [ -n "$EXP" ]; then
             PARSED_SHA=$(printf '%s' "${EXP##*-g}" | sed -n 's/^\([0-9a-f]\{7,40\}\)$/\1/p')
             [ -n "$PARSED_SHA" ] || { echo "::error::cannot parse -g<sha> from $EXP"; exit 1; }
             git fetch --depth 1 origin "$PARSED_SHA"
             git checkout --detach FETCH_HEAD
-            PARsed="$PARSED_SHA"
-            echo "pinned to commit from input string: $PARSED_SHA"
+            echo "pinned to commit from input string"
           else
             echo "no version input -> using upstream HEAD of $KR_BRANCH (auto-follow)"
           fi
@@ -121,15 +119,14 @@ jobs:
           ANDROID_REL=$(printf '%s' "$BRANCH_VAL" | sed -n 's/^\(android[0-9]\{2,\}\)-.*/\1/p')
           [ -n "$ANDROID_REL" ] && [ -n "$KMI_VAL" ] || { echo "::error::cannot derive android release / KMI from build.config.*"; exit 1; }
           KMI_TAG="$ANDROID_REL-$KMI_VAL"
-          SHA=$(git rev-parse --short=12 HEAD)   # 与内核 setlocalversion/git describe 的自动缩写长度一致（此仓库为 12）
-          if [ -n "$PARsed" ]; then SHA_TOKEN="$PARsed"; else SHA_TOKEN="$SHA"; fi
-          DERIVED="$BASE-$KMI_TAG-g$SHA_TOKEN"
+          SHA=$(git rev-parse --short=11 HEAD)
+          DERIVED="$BASE-$KMI_TAG-g$SHA"
           echo "derived version: $DERIVED"
           if [ -n "$EXP" ] && [ "$DERIVED" != "$EXP" ]; then
             echo "::error::upstream yields $DERIVED but input expected $EXP"; exit 1
           fi
           echo "EXPECTED_VERSION=$DERIVED" >> "$GITHUB_ENV"
-          echo "KERNEL_LOCALVERSION=-$KMI_TAG-g$SHA_TOKEN" >> "$GITHUB_ENV"
+          echo "KERNEL_LOCALVERSION=-$KMI_TAG-g$SHA" >> "$GITHUB_ENV"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "short=$(echo "$SHA" | cut -c1-10)" >> "$GITHUB_OUTPUT"
 
@@ -193,6 +190,11 @@ jobs:
           cat "$OUT/include/config/kernel.release" > dist/KERNEL_VERSION.txt
           ls -l dist
 
+      - name: Validate anykernel.sh (shell syntax)
+        run: |
+          sh -n m2391-droidspaces/anykernel.sh || { echo "::error::anykernel.sh has a shell syntax error (values must not contain unquoted parens)"; exit 1; }
+          grep -q '^kernel.string="' m2391-droidspaces/anykernel.sh || echo "::warning::kernel.string should be quoted"
+          grep -q '^is_slot_device=1' m2391-droidspaces/anykernel.sh || echo "::warning::is_slot_device is not 1 (device is A/B)"
       - name: Build AnyKernel3 zip (A/B)
         continue-on-error: true
         run: |
