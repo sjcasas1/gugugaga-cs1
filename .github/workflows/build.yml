@@ -145,13 +145,13 @@ jobs:
         continue-on-error: true
         run: |
           cd src
-          curl -fsSL -o /tmp/ksu-setup.sh "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" && bash /tmp/ksu-setup.sh main || echo "KernelSU setup failed"
+          curl -fsSL -o /tmp/ksu-setup.sh "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/master/kernel/setup.sh" && bash /tmp/ksu-setup.sh master || echo "KernelSU-Next setup failed"
           if [ -d drivers/kernelsu ]; then
             echo "ksu=yes" >> "$GITHUB_OUTPUT"
             git add -A && git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "kernelsu: built-in" || true
           else
             echo "ksu=no" >> "$GITHUB_OUTPUT"
-            echo "::warning::KernelSU not integrated, kernel will boot without root"
+            echo "::warning::KernelSU-Next not integrated, kernel will boot without root"
           fi
 
       - name: Configure kernel
