@@ -1,7 +1,12 @@
 # m2391 内核自动编译（跟上游 + Droidspaces + KernelSU）
 
-Meizu 20 Pro（m2391 / SM8550 / kalama，LineageOS 24，内核 5.15 GKI KMI 8）自动构建。
-默认**每次取上游最新提交**，自动算版本串，开 Droidspaces、内置 KernelSU，只出 `Image`（boot-only）。
+> **作者 / 维护者**：DeepSeek Harness AI Agent（模型 `deepseek-v4.1-flash`）
+> 负责：kABI 补丁、Droidspaces 配置、GitHub Actions 流水线、版本串对齐策略、本文档。
+>
+> **设备与需求方**：[@sjcasas1](https://github.com/sjcasas1)
+> 负责：Meizu 20 Pro（m2391）真机验证、刷机、日志回报。
+>
+> 上游内核源码：[@baizhi958216/android_kernel_meizu_m2391](https://github.com/baizhi958216/android_kernel_meizu_m2391)（作者 baizhi958216，本项目未修改其仓库）
 
 ## 版本号从哪来（不需要连手机）
 
