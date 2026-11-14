@@ -143,6 +143,24 @@ jobs:
           git status --short
           echo "tree is clean => no -dirty suffix in kernel release"
 
+      - name: Integrate KernelSU (built-in, best effort)
+        id: ksu
+        continue-on-error: true
+        run: |
+          cd src
+          if curl -fsSL -o /tmp/ksu-setup.sh "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"; then
+            bash /tmp/ksu-setup.sh main || echo "setup.sh returned non-zero"
+          else
+            echo "cannot download KernelSU setup.sh"
+          fi
+          if [ -d drivers/kernelsu ]; then
+            echo "ksu=yes" >> "$GITHUB_OUTPUT"
+            echo "KernelSU integrated: $(cat drivers/kernelsu/kernelsu_version 2>/dev/null || echo unknown)"
+            git add -A && git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "kernelsu: built-in" || true
+          else
+            echo "ksu=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::KernelSU integration failed, kernel will boot WITHOUT root"
+          fi
       - name: Configure kernel
         run: |
           cd src
@@ -150,7 +168,7 @@ jobs:
           scripts/kconfig/merge_config.sh -m -O out out/.config "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config" >/dev/null
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
           echo '---- Droidspaces options ----'
-          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=' out/.config || true
+          grep -E '^CONFIG_(KSU|SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=' out/.config || true
           if ! grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' out/.config; then
             echo "::error::CONFIG_ANDROID_KABI_RESERVE is not y -> struct task_struct layout moved, boot-only flash would break vendor modules";
             exit 1
@@ -201,7 +219,7 @@ jobs:
           TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}a${{ github.run_attempt }}"
           gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
             --title "$KV  (${{ steps.sync.outputs.short }})" \
-            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }} kabi_padding: yes lto: thin"
+            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }} kabi_padding: yes lto: thin kernelsu: ${{ steps.ksu.outputs.ksu }}"
 
       - name: Record last build
         run: |
