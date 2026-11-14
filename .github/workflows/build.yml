@@ -175,7 +175,8 @@ jobs:
       - name: Build Image (ThinLTO)
         run: |
           cd src
-          make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
+          # LOCALVERSION= 空值会让 setlocalversion 跳过追加 "+" 的分支
+          make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 LOCALVERSION= -j"$JOBS" Image
           REL=$(cat "$OUT/include/config/kernel.release")
           echo "kernel release: $REL"
           [ "$REL" = "$EXPECTED_VERSION" ] || { echo "::error::built $REL but expected $EXPECTED_VERSION (vendor modules would reject)"; exit 1; }
