@@ -1,6 +1,6 @@
-# AnyKernel3 template for Meizu 20 Pro (m2391) - A/B device (AB_OTA_UPDATER=true)
-# 版本检查留空：不同 Lineage 构建上报的 release 字符串不一致，空 = 不校验
-kernel.string=Droidspaces kernel for Meizu 20 Pro (m2391)
+# AnyKernel3 template for Meizu 20 Pro (m2391), A/B device, AB_OTA_UPDATER=true
+# 注意: 值里不能出现未加引号的括号，否则 shell 报 syntax error
+kernel.string="Droidspaces kernel for Meizu 20 Pro m2391"
 do.devicecheck=1
 do.modules=0
 do.systemless=0
