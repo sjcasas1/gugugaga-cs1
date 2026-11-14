@@ -91,7 +91,7 @@ jobs:
             if [ -x "/usr/lib/llvm-14/bin/$t" ]; then src="/usr/lib/llvm-14/bin/$t";
             elif command -v "$t" >/dev/null 2>&1; then src="$(command -v "$t")";
             elif command -v "$t-14" >/dev/null 2>&1; then src="$(command -v "$t-14")"; fi
-            [ -n "$src" ] && ln -sf "$src" "$HOME/clang/bin/$t"
+            if [ -n "$src" ]; then ln -sf "$src" "$HOME/clang/bin/$t"; fi
           done
           test -x "$HOME/clang/bin/clang"; test -x "$HOME/clang/bin/ld.lld"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
@@ -175,8 +175,7 @@ jobs:
       - name: Build Image (ThinLTO)
         run: |
           cd src
-          # LOCALVERSION= 空值会让 setlocalversion 跳过追加 "+" 的分支
-          make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 LOCALVERSION= -j"$JOBS" Image
+          make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
           REL=$(cat "$OUT/include/config/kernel.release")
           echo "kernel release: $REL"
           [ "$REL" = "$EXPECTED_VERSION" ] || { echo "::error::built $REL but expected $EXPECTED_VERSION (vendor modules would reject)"; exit 1; }
@@ -242,7 +241,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last-build.json
-          git diff --cached --quiet && exit 0
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -m "build: $KV"
           for i in 1 2 3; do git pull --rebase --autostash origin main >/dev/null 2>&1 || true; git push && break || sleep 5; done
 
