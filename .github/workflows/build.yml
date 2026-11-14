@@ -1,15 +1,16 @@
 name: m2391-sync-and-build
 
-# v6 关键修正：
-# 1) 打完 kABI 补丁后 git commit，避免内核版本带上 "-dirty"，否则 UTS_RELEASE/vermagic
-#    与现有 vendor 模块不一致，模块会被拒载（"version magic ... should be ..."）。
-# 2) 硬校验 CONFIG_ANDROID_KABI_RESERVE=y，缺失就失败（否则只刷 boot 会砖）。
-# 3) AnyKernel3 按 A/B 设备配置（m2391 是 AB_OTA_UPDATER）。
-# 4) 去掉无效的 dtbs 构建与无效的 toolchain 缓存；clone/apt 加 retry。
+# 单一输入 expected_version（直接粘 adb shell uname -r 的结果）。
+# 流水线自动：从串里反推 commit + android/KMI 标签，校验上游 Makefile/build.config 能否复现该串，
+# 然后钉住该 commit、写死 CONFIG_LOCALVERSION、编 Image、出 AK3 包。
 
 on:
   workflow_dispatch:
     inputs:
+      expected_version:
+        description: 'adb shell uname -r 的完整输出（含 -android13-8-g<sha>）'
+        default: '5.15.223-android13-8-gd7402701fe45'
+        required: true
       kernel_repo:
         description: 'upstream repo (owner/name)'
         default: 'baizhi958216/android_kernel_meizu_m2391'
@@ -18,10 +19,6 @@ on:
         description: 'branch'
         default: 'oss/lineage-24.0'
         required: true
-      kernel_commit:
-        description: 'commit SHA to pin (default = the commit your ROMs modules were built at)'
-        default: 'd7402701fe4589317a181db95adfd3c32e2ff2be'
-        required: false
       make_release:
         description: 'create a GitHub Release'
         default: 'true'
@@ -51,12 +48,11 @@ jobs:
       KBUILD_BUILD_USER: gh-actions
       KBUILD_BUILD_HOST: github
       KBUILD_BUILD_TIMESTAMP: '2026-01-01 00:00:00 UTC'
+      EXPECTED_VERSION: ${{ inputs.expected_version || '5.15.223-android13-8-gd7402701fe45' }}
       KR_REPO: ${{ inputs.kernel_repo || 'baizhi958216/android_kernel_meizu_m2391' }}
       KR_BRANCH: ${{ inputs.kernel_branch || 'oss/lineage-24.0' }}
-      KR_COMMIT: ${{ inputs.kernel_commit || 'd7402701fe4589317a181db95adfd3c32e2ff2be' }}
       MAKE_RELEASE: ${{ inputs.make_release || 'true' }}
       JOBS: 4
-      KERNEL_LOCALVERSION: ${{ inputs.localversion || '-android13-8-gd7402701fe45' }}
       OUT: ${{ github.workspace }}/build-out
 
     steps:
@@ -70,15 +66,10 @@ jobs:
         continue-on-error: true
         run: |
           SWAP_MB=$(free -m | awk '/^Swap:/{print $2+0}')
-          echo "current swap: ${SWAP_MB}MB"
           if [ "$SWAP_MB" -lt 4096 ]; then
-            sudo swapoff -a || true
-            sudo rm -f /swapfile || true
+            sudo swapoff -a || true; sudo rm -f /swapfile || true
             sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 || true
-            sudo chown root:root /swapfile || true
-            sudo chmod 600 /swapfile || true
-            sudo mkswap /swapfile || true
-            sudo swapon /swapfile || true
+            sudo chmod 600 /swapfile || true; sudo mkswap /swapfile || true; sudo swapon /swapfile || true
           fi
           free -h
 
@@ -86,9 +77,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 10
-          done
+          for i in 1 2 3; do sudo apt-get update && break || sleep 10; done
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
             dwarves cpio kmod rsync zip unzip python3 xz-utils patch git \
@@ -102,88 +91,84 @@ jobs:
             if [ -x "/usr/lib/llvm-14/bin/$t" ]; then src="/usr/lib/llvm-14/bin/$t";
             elif command -v "$t" >/dev/null 2>&1; then src="$(command -v "$t")";
             elif command -v "$t-14" >/dev/null 2>&1; then src="$(command -v "$t-14")"; fi
-            if [ -n "$src" ]; then ln -sf "$src" "$HOME/clang/bin/$t"; fi
+            [ -n "$src" ] && ln -sf "$src" "$HOME/clang/bin/$t"
           done
-          test -x "$HOME/clang/bin/clang"
-          test -x "$HOME/clang/bin/ld.lld"
+          test -x "$HOME/clang/bin/clang"; test -x "$HOME/clang/bin/ld.lld"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version
-          "$HOME/clang/bin/ld.lld" --version
 
-      - name: Sync upstream (clone, retry)
-        id: sync
+      - name: Parse expected version and fetch matching upstream commit
+        id: pin
         run: |
-          for i in 1 2 3; do
-            rm -rf src
-            if git clone --depth 1 --single-branch --branch "$KR_BRANCH" "https://github.com/$KR_REPO.git" src; then break; fi
-            echo "clone failed (attempt $i), retrying"; sleep 15
-          done
+          EXP="$EXPECTED_VERSION"
+          BASE="${EXP%%-*}"
+          SUFFIX="${EXP#$BASE}"
+          SHA=$(printf '%s' "$SUFFIX" | sed -n 's/.*-g\([0-9a-f]\{7,40\}\)$/\1/p')
+          KMI_TAG=$(printf '%s' "$SUFFIX" | sed -n 's/^-\(android[0-9]\{2,\}-[0-9]\+\).*/\1/p')
+          echo "base=$BASE suffix=$SUFFIX sha=$SHA kmi_tag=$KMI_TAG"
+          [ -n "$SHA" ] || { echo "::error::cannot parse -g<sha> out of EXPECTED_VERSION"; exit 1; }
+          [ -n "$KMI_TAG" ] || { echo "::error::cannot parse -androidNN-KMI out of EXPECTED_VERSION"; exit 1; }
+          for i in 1 2 3; do rm -rf src; git clone --depth 1 --single-branch --branch "$KR_BRANCH" "https://github.com/$KR_REPO.git" src && break || sleep 15; done
           test -d src/.git
-          if [ -n "$KR_COMMIT" ]; then
-            cd src
-            git fetch --depth 1 origin "$KR_COMMIT" && git checkout --detach FETCH_HEAD
-            cd ..
-          fi
-          SHA=$(git -C src rev-parse HEAD)
+          cd src
+          git fetch --depth 1 origin "$SHA"
+          git checkout --detach FETCH_HEAD
+          HEAD_SHA=$(git rev-parse --short=11 HEAD)
+          [ "$HEAD_SHA" = "$SHA" ] || { echo "::error::checked out $HEAD_SHA but expected $SHA"; exit 1; }
+          SUB=$(make -s kernelversion)
+          [ "$SUB" = "$BASE" ] || { echo "::error::upstream Makefile says $SUB, expected $BASE"; exit 1; }
+          BRANCH_VAL=$(sed -n 's/^BRANCH=//p' build.config.constants)
+          KMI_VAL=$(sed -n 's/^KMI_GENERATION=//p' build.config.common)
+          ANDROID_REL=$(printf '%s' "$BRANCH_VAL" | sed -n 's/^\(android[0-9]\{2,\}\)-.*/\1/p')
+          DERIVED="$ANDROID_REL-$KMI_VAL"
+          echo "derived KMI tag: $DERIVED"
+          [ "$DERIVED" = "$KMI_TAG" ] || { echo "::error::build.config yields $DERIVED but version says $KMI_TAG"; exit 1; }
+          echo "OK: $BASE-$DERIVED-g$HEAD_SHA is reproducible from upstream"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "short=$(echo "$SHA" | cut -c1-10)" >> "$GITHUB_OUTPUT"
-          git -C src log -1 --oneline
+          echo "KERNEL_LOCALVERSION=$SUFFIX" >> "$GITHUB_ENV"
 
       - name: Apply Droidspaces kABI patch and commit it
         run: |
           cd src
           PATCH="$GITHUB_WORKSPACE/m2391-droidspaces/0001-ABI-use-ABI-padding-for-SYSVIPC.patch"
-          if ! patch -p1 --dry-run < "$PATCH"; then
-            echo "::error::kABI patch no longer applies to upstream sched.h (upstream changed?); aborting instead of shipping an ABI-breaking kernel"
-            exit 1
-          fi
+          patch -p1 --dry-run < "$PATCH" || { echo "::error::kABI patch no longer applies (upstream sched.h changed)"; exit 1; }
           patch -p1 < "$PATCH"
-          grep -q "android_kabi_reserved6" include/linux/sched.h || { echo "::error::patch applied but expected kABI padding not found"; exit 1; }
-          # 关键：提交掉，避免 uname -r 出现 -dirty，导致 vermagic 与现有模块不匹配
-          git add -A
-          git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "droidspaces: kABI-safe SYSVIPC padding"
-          git status --short
-          echo "tree is clean => no -dirty suffix in kernel release"
+          grep -q "android_kabi_reserved6" include/linux/sched.h || { echo "::error::kABI padding not found after patch"; exit 1; }
+          git add -A && git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "droidspaces: kABI-safe SYSVIPC padding"
+          git status --porcelain | head -5
 
       - name: Integrate KernelSU (built-in, best effort)
         id: ksu
         continue-on-error: true
         run: |
           cd src
-          if curl -fsSL -o /tmp/ksu-setup.sh "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"; then
-            bash /tmp/ksu-setup.sh main || echo "setup.sh returned non-zero"
-          else
-            echo "cannot download KernelSU setup.sh"
-          fi
+          curl -fsSL -o /tmp/ksu-setup.sh "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" && bash /tmp/ksu-setup.sh main || echo "KernelSU setup failed"
           if [ -d drivers/kernelsu ]; then
             echo "ksu=yes" >> "$GITHUB_OUTPUT"
-            echo "KernelSU integrated: $(cat drivers/kernelsu/kernelsu_version 2>/dev/null || echo unknown)"
             git add -A && git -c user.name=gh-actions -c user.email=gh-actions@users.noreply.github.com commit -q -m "kernelsu: built-in" || true
           else
             echo "ksu=no" >> "$GITHUB_OUTPUT"
-            echo "::warning::KernelSU integration failed, kernel will boot WITHOUT root"
+            echo "::warning::KernelSU not integrated, kernel will boot without root"
           fi
+
       - name: Configure kernel
         run: |
           cd src
           make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 $DEFCONFIG
           scripts/kconfig/merge_config.sh -m -O "$OUT" "$OUT/.config" "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config" >/dev/null
           make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
-          # 版本串写死成 ROM 编模块时的那一串；AUTO 关掉，免得 git 状态参与
           scripts/config --file "$OUT/.config" --set-str LOCALVERSION "$KERNEL_LOCALVERSION"
           scripts/config --file "$OUT/.config" --disable LOCALVERSION_AUTO
           make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
-          echo "LOCALVERSION line: $(grep '^CONFIG_LOCALVERSION' "$OUT/.config")"
-          grep -q "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" "$OUT/.config" || { echo "::error::LOCALVERSION not written (value empty?)"; exit 1; }
-          grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' "$OUT/.config" || { echo "::error::LOCALVERSION_AUTO still enabled"; exit 1; }
-          echo "--- src tree status (must be clean, otherwise version gets +) ---"
-          git status --porcelain | head -5
-          echo "--- Droidspaces options ---"
-          grep -E '^CONFIG_(KSU|SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=' "$OUT/.config" || true
-          grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' "$OUT/.config" || { echo "::error::CONFIG_ANDROID_KABI_RESERVE is not y -> ABI moved, boot-only flash would break vendor modules"; exit 1; }
+          grep -q "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" "$OUT/.config" || { echo "::error::LOCALVERSION not written"; exit 1; }
+          grep -q "^# CONFIG_LOCALVERSION_AUTO is not set" "$OUT/.config" || { echo "::error::LOCALVERSION_AUTO still enabled"; exit 1; }
+          grep -q "^CONFIG_ANDROID_KABI_RESERVE=y" "$OUT/.config" || { echo "::error::kABI padding disabled"; exit 1; }
           for opt in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS; do
             grep -q "^CONFIG_${opt}=y" "$OUT/.config" || { echo "::error::missing CONFIG_${opt}=y"; exit 1; }
           done
+          echo "--- key options ---"
+          grep -E "^CONFIG_(KSU|SYSVIPC|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=" "$OUT/.config" || true
 
       - name: Build Image (ThinLTO)
         run: |
@@ -191,8 +176,7 @@ jobs:
           make O="$OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
           REL=$(cat "$OUT/include/config/kernel.release")
           echo "kernel release: $REL"
-          [ "$REL" = "5.15.223$KERNEL_LOCALVERSION" ] || { echo "::error::version $REL != 5.15.223$KERNEL_LOCALVERSION (vendor modules would reject)"; exit 1; }
-          echo "vermagic: $REL SMP preempt mod_unload modversions aarch64"
+          [ "$REL" = "$EXPECTED_VERSION" ] || { echo "::error::built $REL but expected $EXPECTED_VERSION (vendor modules would reject)"; exit 1; }
           free -h; df -h /
 
       - name: Collect artifacts
@@ -216,7 +200,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: kernel-m2391-${{ steps.sync.outputs.short }}-r${{ github.run_number }}
+          name: kernel-m2391-${{ steps.pin.outputs.short }}-r${{ github.run_number }}
           path: dist/
           retention-days: 30
 
@@ -226,23 +210,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           KV=$(cat dist/KERNEL_VERSION.txt)
-          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}a${{ github.run_attempt }}"
-          gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
-            --title "$KV  (${{ steps.sync.outputs.short }})" \
-            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }} kabi_padding: yes lto: thin kernelsu: ${{ steps.ksu.outputs.ksu }}"
+          TAG="build-$(date +%Y%m%d)-${{ steps.pin.outputs.short }}-r${{ github.run_number }}a${{ github.run_attempt }}"
+          gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/KERNEL_VERSION.txt dist/kernel-m2391-droidspaces.zip \
+            --title "$KV" \
+            --notes "expected: ${{ env.EXPECTED_VERSION }} upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.pin.outputs.sha }} kabi_padding: yes lto: thin kernelsu: ${{ steps.ksu.outputs.ksu }}"
 
       - name: Record last build
         run: |
           KV=$(cat dist/KERNEL_VERSION.txt)
-          SHA="${{ steps.sync.outputs.sha }}"
           cat > last-build.json <<EOF
           {
             "kernel_repo": "$KR_REPO",
             "kernel_branch": "$KR_BRANCH",
-            "commit": "$SHA",
+            "commit": "${{ steps.pin.outputs.sha }}",
             "kernel_version": "$KV",
             "kabi_padding": "yes",
             "lto": "thin",
+            "kernelsu": "${{ steps.ksu.outputs.ksu }}",
             "run": "${{ github.run_number }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
@@ -250,16 +234,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last-build.json
-          git diff --cached --quiet && echo "no change" && exit 0
-          git commit -m "build: $KV ($(echo "$SHA" | cut -c1-10))"
-          for i in 1 2 3; do
-            git pull --rebase --autostash origin main >/dev/null 2>&1 || true
-            git push && break || sleep 5
-          done
+          git diff --cached --quiet && exit 0
+          git commit -m "build: $KV"
+          for i in 1 2 3; do git pull --rebase --autostash origin main >/dev/null 2>&1 || true; git push && break || sleep 5; done
 
       - name: Diagnostics on failure
         if: failure()
         run: |
-          echo "--- free ---"; free -h || true
-          echo "--- disk ---"; df -h / || true
-          echo "--- kernel log tail ---"; sudo dmesg | tail -n 20 || true
+          echo "--- free/disk ---"; free -h || true; df -h / || true
+          echo "--- kernel log ---"; sudo dmesg | tail -n 20 || true
