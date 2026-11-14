@@ -19,8 +19,8 @@ on:
         default: 'oss/lineage-24.0'
         required: true
       kernel_commit:
-        description: 'commit SHA to pin (empty = branch head)'
-        default: ''
+        description: 'commit SHA to pin (default = the commit your ROMs modules were built at)'
+        default: 'd7402701fe4589317a181db95adfd3c32e2ff2be'
         required: false
       make_release:
         description: 'create a GitHub Release'
@@ -53,7 +53,7 @@ jobs:
       KBUILD_BUILD_TIMESTAMP: '2026-01-01 00:00:00 UTC'
       KR_REPO: ${{ inputs.kernel_repo || 'baizhi958216/android_kernel_meizu_m2391' }}
       KR_BRANCH: ${{ inputs.kernel_branch || 'oss/lineage-24.0' }}
-      KR_COMMIT: ${{ inputs.kernel_commit || '' }}
+      KR_COMMIT: ${{ inputs.kernel_commit || 'd7402701fe4589317a181db95adfd3c32e2ff2be' }}
       MAKE_RELEASE: ${{ inputs.make_release || 'true' }}
       JOBS: 4
 
@@ -167,6 +167,12 @@ jobs:
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 $DEFCONFIG
           scripts/kconfig/merge_config.sh -m -O out out/.config "$GITHUB_WORKSPACE/m2391-droidspaces/droidspaces.config" >/dev/null
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
+          # 关键：把版本串写死成 ROM 编模块时的那个，否则 vendor_dlkm 的模块全部拒载
+          scripts/config --file out/.config --set-str LOCALVERSION "$KERNEL_LOCALVERSION"
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 olddefconfig >/dev/null
+          echo "forced localversion: $(grep '^CONFIG_LOCALVERSION' out/.config)"
+          grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' out/.config || { echo '::error::LOCALVERSION_AUTO still enabled, version string would drift'; exit 1; }
           echo '---- Droidspaces options ----'
           grep -E '^CONFIG_(KSU|SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|FUSE_FS|ANDROID_KABI_RESERVE|LTO_CLANG_THIN)=' out/.config || true
           if ! grep -q '^CONFIG_ANDROID_KABI_RESERVE=y' out/.config; then
@@ -181,7 +187,9 @@ jobs:
         run: |
           cd src
           make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
-          echo "kernel release: $(cat out/include/config/kernel.release)"
+          REL=$(cat out/include/config/kernel.release)
+          echo "kernel release: $REL"
+          [ "$REL" = "5.15.223$KERNEL_LOCALVERSION" ] || { echo "::error::version $REL != 5.15.223$KERNEL_LOCALVERSION (vendor modules would reject)"; exit 1; }
           echo "vermagic:       $(cat out/include/config/kernel.release) SMP preempt mod_unload modversions aarch64"
           free -h; df -h /
 
