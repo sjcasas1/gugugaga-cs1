@@ -26,10 +26,6 @@ on:
         description: 'create a GitHub Release'
         default: 'true'
         required: false
-      localversion:
-        description: 'LOCALVERSION suffix (must match your ROM vermagic, e.g. -android13-8)'
-        default: '-android13-8'
-        required: false
   schedule:
     - cron: '0 18 * * *'
   push:
@@ -60,7 +56,6 @@ jobs:
       KR_COMMIT: ${{ inputs.kernel_commit || '' }}
       MAKE_RELEASE: ${{ inputs.make_release || 'true' }}
       JOBS: 4
-      KERNEL_LOCALVERSION: ${{ inputs.localversion || '-android13-8' }}
 
     steps:
       - name: Free disk space
@@ -185,9 +180,8 @@ jobs:
       - name: Build Image (ThinLTO)
         run: |
           cd src
-          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 LOCALVERSION="$KERNEL_LOCALVERSION" -j"$JOBS" Image
+          make O=out ARCH=$ARCH LLVM=1 LLVM_IAS=1 -j"$JOBS" Image
           echo "kernel release: $(cat out/include/config/kernel.release)"
-          echo "expected vermagic: $(cat out/include/config/kernel.release) SMP preempt mod_unload modversions aarch64"
           echo "vermagic:       $(cat out/include/config/kernel.release) SMP preempt mod_unload modversions aarch64"
           free -h; df -h /
 
@@ -224,7 +218,7 @@ jobs:
           KV=$(cat dist/KERNEL_VERSION.txt)
           TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}a${{ github.run_attempt }}"
           gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
-            --title "$KV  (droidspaces${{ steps.ksu.outputs.ksu == 'yes' && '+ksu' || '' }}, ${{ steps.sync.outputs.short }})" \
+            --title "$KV  (${{ steps.sync.outputs.short }})" \
             --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }} kabi_padding: yes lto: thin kernelsu: ${{ steps.ksu.outputs.ksu }}"
 
       - name: Record last build
