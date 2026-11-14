@@ -186,10 +186,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           KV=$(cat dist/KERNEL_VERSION.txt)
-          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}"
+          TAG="build-$(date +%Y%m%d)-${{ steps.sync.outputs.short }}-r${{ github.run_number }}"
           gh release create "$TAG" dist/Image dist/Image.gz dist/kernel.config dist/kernel-m2391-droidspaces.zip \
             --title "$KV  (${{ steps.sync.outputs.short }})" \
-            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }}" || true
+            --notes "upstream: ${{ env.KR_REPO }}@${{ env.KR_BRANCH }} commit: ${{ steps.sync.outputs.sha }}"
 
       - name: Record last build
         run: |
