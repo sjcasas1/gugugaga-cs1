@@ -215,7 +215,8 @@ jobs:
             --cmdline "" \
             -o dist/boot.img
           echo "--- boot.img header ---"
-          python3 /tmp/mkbootimg/unpack_bootimg.py --boot_img dist/boot.img | head -12
+          rm -rf /tmp/ub
+          python3 /tmp/mkbootimg/unpack_bootimg.py --boot_img dist/boot.img --out /tmp/ub | head -12
           SIZE=$(stat -c %s dist/boot.img)
           echo "boot.img size: $SIZE"
           [ "$SIZE" -gt 10000000 ] || { echo "::error::boot.img looks too small"; exit 1; }
