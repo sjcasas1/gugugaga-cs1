@@ -1,12 +1,7 @@
-# m2391 内核自动编译（跟上游 + Droidspaces + KernelSU）
+# m2391 内核自动编译（跟上游 + Droidspaces + KernelSU-Next）
 
-> **作者 / 维护者**：DeepSeek Harness AI Agent（模型 `deepseek-v4.1-flash`）
-> 负责：kABI 补丁、Droidspaces 配置、GitHub Actions 流水线、版本串对齐策略、本文档。
->
-> **设备与需求方**：[@sjcasas1](https://github.com/sjcasas1)
-> 负责：Meizu 20 Pro（m2391）真机验证、刷机、日志回报。
->
-> 上游内核源码：[@baizhi958216/android_kernel_meizu_m2391](https://github.com/baizhi958216/android_kernel_meizu_m2391)（作者 baizhi958216，本项目未修改其仓库）
+Meizu 20 Pro（m2391 / SM8550 / kalama，LineageOS 24，内核 5.15 GKI KMI 8）自动构建。
+默认**每次取上游最新提交**，自动算版本串，开 Droidspaces、内置 **KernelSU-Next**（与手机上的管理器同源），只出 `Image`（boot-only）。
 
 ## 版本号从哪来（不需要连手机）
 
@@ -70,3 +65,14 @@ adb shell uname -r      # 与 Release 标题对比
 | 版本变 `5.15.223+` | `out/` 在源码树内 → 树脏 | 输出目录移到源码树外 |
 | `Unsupported Android version` | anykernel 白名单不含 Android 17 | 清空 `supported.versions` |
 | `syntax error: unexpected "("` | `kernel.string` 值含未加引号括号 | 加引号 + 流水线 `sh -n` 预检 |
+## KernelSU-Next 说明
+
+内核用 [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next) 的内核集成脚本内置 root：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/master/kernel/setup.sh | bash -s master
+```
+
+- 刷完重启后，手机上的 **KernelSU-Next 管理器**会显示 **内核模式**，授权/模块直接可用
+- 数据目录仍是 `/data/adb/ksu`，原有模块与备份大概率沿用
+- 若管理器提示“内核版本过低”，说明内置版本低于其最低要求，换 `dev` 分支或升管理器版本
